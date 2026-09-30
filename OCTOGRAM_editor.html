@@ -1,0 +1,172 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>OCTOGRAM EDITOR</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Fira+Mono">
+<style>
+:root{color-scheme:light;--bg:#aaccaa;--mid:#77aa77;--dk:#113311;--gb:#99cc99;--gc:#557755;--cb:#cccc77;--cc:#555511;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:8px;background:var(--bg);color:var(--dk);font:400 100px "Fira Mono Bold",monospace;text-align:center}
+body.drop{outline:8px dashed var(--dk);outline-offset:-8px}
+button,input,textarea{font:inherit;color:inherit;background:var(--mid);border:10px solid var(--dk);border-radius:10px;outline:none}
+button{cursor:pointer}
+input,textarea{text-align:center}
+textarea{width:min(700px,92%);height:200px;font-size:30px;text-align:left;box-sizing:border-box}
+.big{display:block;margin:10px auto 0}
+.lb{height:150px;width:150px;margin:10px 0 0 10px;vertical-align:top}
+.lb div{text-align:center}
+.tiny{font-size:16px}.medium{font-size:60px}
+.greyed{background:var(--gb);border-color:var(--gc);color:var(--gc)}
+.comp{background:var(--cb);border-color:var(--cc);color:var(--cc)}
+.t{font-size:16px;margin:4px}.m{font-size:30px}button.m{border-width:3px}
+.little{position:absolute;top:10px;left:10px;font-size:30px}
+button.topright{position:absolute;top:10px;right:10px;margin:0}
+button.nav{margin-top:200px;position:relative;top:50%;transform:translateY(-50%)}
+.row{margin:26px auto}
+.title{font-size:100px;overflow-wrap:anywhere}
+p{margin:10px 0}
+</style></head>
+<body><div id="g"></div><input type="file" id="fi" multiple hidden>
+<script>
+const G=document.getElementById('g'),$=id=>document.getElementById(id),enc=new TextEncoder(),dec=new TextDecoder();
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let S={play:[],edit:[]},V={v:'main',m:'play',r:0,l:0};
+try{const d=JSON.parse(localStorage.getItem('octo2'));if(d&&d.play&&d.edit)S=d}catch(e){}
+['play','edit'].forEach(k=>S[k].forEach(r=>{if(r.title==='UNTITLED')r.title='';if(r.name==='untitled')r.name=''}));
+const save=()=>{try{localStorage.setItem('octo2',JSON.stringify(S))}catch(e){}};
+const rows=()=>S[V.m];
+const say=t=>{const m=$('msg');if(m)m.textContent=t};
+
+/* ---- condition language: "text" AND OR XOR NOT BEFORE THEN ( ) ---- */
+function parseCond(src){
+ src=src.trim();if(!src)return null;
+ const T=[],re=/\s*(?:"([^"]*)"|([()])|([A-Za-z]+)|(\S))/g;let m;
+ while((m=re.exec(src))&&m[0]){
+  if(m[1]!==undefined)T.push({s:m[1].toLowerCase()});else if(m[2])T.push({p:m[2]});
+  else if(m[3])T.push({w:m[3].toUpperCase()});else throw Error('BAD CHAR '+m[4])}
+ let p=0;const w=x=>T[p]&&T[p].w===x;
+ const or=()=>{let a=and();while(w('OR')||w('XOR')){const o=T[p++].w;a={o,a:[a,and()]}}return a};
+ const and=()=>{let a=not();while(w('AND')){p++;a={o:'AND',a:[a,not()]}}return a};
+ const not=()=>{if(w('NOT')){p++;return{o:'NOT',a:[not()]}}return seq()};
+ const seq=()=>{const l=[{n:atom()}];while(w('BEFORE')||w('THEN')){const op=T[p++].w;l.push({op,n:atom()})}return l.length>1?{o:'SEQ',l}:l[0].n};
+ const atom=()=>{const k=T[p++];if(!k)throw Error('UNEXPECTED END');if(k.s!==undefined)return k;
+  if(k.p==='('){const e=or();if(!T[p]||T[p].p!==')')throw Error('MISSING )');p++;return e}
+  throw Error('UNEXPECTED '+(k.w||k.p))};
+ const r=or();if(p<T.length)throw Error('UNEXPECTED '+(T[p].w||T[p].p||'TEXT'));return r}
+const ev=(n,x)=>{
+ if(n.s!==undefined)return x.includes(n.s);
+ if(n.o==='NOT')return!ev(n.a[0],x);
+ if(n.o==='AND')return ev(n.a[0],x)&&ev(n.a[1],x);
+ if(n.o==='OR')return ev(n.a[0],x)||ev(n.a[1],x);
+ if(n.o==='XOR')return ev(n.a[0],x)!==ev(n.a[1],x);
+ let pos=0;
+ for(const it of n.l){
+  if(it.n.s!==undefined){const i=x.indexOf(it.n.s,pos);if(i<0||(it.op==='THEN'&&i!==pos))return false;pos=i+it.n.s.length}
+  else if(!ev(it.n,x))return false}
+ return true};
+const ok=(l,t)=>{t=t.trim().toLowerCase();if(!t)return false;
+ if(l.ans.split('\n').map(s=>s.trim().toLowerCase()).filter(Boolean).includes(t))return true;
+ try{const c=parseCond(l.cond);return!!c&&ev(c,t)}catch(e){return false}};
+
+/* ---- .oct binary (OCT2): "OCT2", 4-byte random salt, then scrambled payload of: title, u16 count, per level gram/answers/condition (u16 length + UTF-8) ---- */
+const ks=seed=>{let a=seed>>>0;return()=>{a=(a+0x6D2B79F5)>>>0;let t=a;t=Math.imul(t^t>>>15,t|1);t^=t+Math.imul(t^t>>>7,t|61);return((t^t>>>14)>>>0)&255}};
+const scr=(b,salt)=>{const k=ks(new DataView(salt.buffer,salt.byteOffset,4).getUint32(0)^0x0C70671A),o=new Uint8Array(b.length);let c=0;for(let i=0;i<b.length;i++){o[i]=b[i]^k()^c;c=o[i]}return o};
+const unscr=(b,salt)=>{const k=ks(new DataView(salt.buffer,salt.byteOffset,4).getUint32(0)^0x0C70671A),o=new Uint8Array(b.length);let c=0;for(let i=0;i<b.length;i++){o[i]=b[i]^k()^c;c=b[i]}return o};
+function toOct(r){const P=[];
+ const u=n=>{const b=new Uint8Array(2);new DataView(b.buffer).setUint16(0,n);P.push(b)};
+ const s=x=>{const b=enc.encode(x);u(b.length);P.push(b)};
+ s(r.title||'UNTITLED');u(r.levels.length);for(const l of r.levels){s(l.gram);s(l.ans);s(l.cond)}
+ const raw=new Uint8Array(P.reduce((a,b)=>a+b.length,0));let o=0;for(const b of P){raw.set(b,o);o+=b.length}
+ const salt=crypto.getRandomValues(new Uint8Array(4));
+ return new Blob([enc.encode('OCT2'),salt,scr(raw,salt)],{type:'application/octet-stream'})}
+async function fromOct(f){const all=new Uint8Array(await f.arrayBuffer()),mg=dec.decode(all.slice(0,4));
+ let b,p;
+ if(mg==='OCT1'){b=all;p=4}else if(mg==='OCT2'){b=unscr(all.slice(8),all.slice(4,8));p=0}else throw 0;
+ const v=new DataView(b.buffer,b.byteOffset,b.length);
+ const s=()=>{const n=v.getUint16(p);p+=2;const x=dec.decode(b.slice(p,p+n));p+=n;return x};
+ const title=s(),n=v.getUint16(p);p+=2;const levels=[];
+ for(let i=0;i<n;i++)levels.push({gram:s().toUpperCase(),ans:s(),cond:s()});
+ return{title,name:f.name.replace(/(\.txt)?$/i,'').replace(/\.oct$/i,''),levels}}
+async function imp(fs){let n=0;
+ for(const f of fs){try{S[V.m].push(await fromOct(f));n++}catch(e){}}
+ save();menu();say(n?'IMPORTED '+n:'NOT AN OCT FILE')}
+async function exportRow(i){const r=rows()[i];
+ if(!r.levels.length)return say('ROW IS EMPTY');
+ const bad=r.levels.findIndex(l=>l.gram.length!==8);if(bad>=0)return say('LEVEL '+(bad+1)+' NEEDS 8 LETTERS');
+ for(const l of r.levels){try{parseCond(l.cond)}catch(e){return say('BAD CONDITION: '+e.message)}}
+ const blob=toOct(r),nm=(r.name.trim()||r.title.trim()||'untitled').replace(/[\\/:*?"<>|]/g,'_');
+ let d=null;try{d=window.claude&&await window.claude.use('downloads')}catch(e){}
+ if(d){
+  try{await d.save({filename:nm+'.oct',data:blob});say('SAVED')}
+  catch(e){if(e.code==='rejected_extension'){
+    try{await d.save({filename:nm+'.oct.txt',data:blob});say('SAVED AS .OCT.TXT (RENAME OR IMPORT AS IS)')}catch(x){say('NOT SAVED')}}
+   else say('NOT SAVED')}
+ }else{const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=nm+'.oct';a.click();say('EXPORTED')}}
+
+/* ---- views ---- */
+const btn=(a,t,i='',j='',c='')=>`<button class="${c}" data-a="${a}" data-i="${i}" data-j="${j}">${t}</button>`;
+const bar=(l,r)=>`<div class="little">${l}</div>${r}<br>`;
+function main(){V.v='main';
+ G.innerHTML=`<div class="title" style="margin-top:40px">OCTOGRAM</div><div class="m">ROWMAKER</div><br>${btn('play','PLAYGAME','','','big')}${btn('edit','EDITLVLS','','','big')}`}
+function menu(){V.v='menu';const e=V.m==='edit',R=rows();
+ G.innerHTML=bar(e?'EDITMODE':'PLAYMODE',btn('main','MAINMENU','','','m topright'))+
+ (R.length?'':'<p class="m">NO ROWS YET</p>')+
+ R.map((r,i)=>'<div class="row">'+(e?
+  `<input data-f="title" data-i="${i}" value="${esc(r.title)}" placeholder="UNTITLED" maxlength="40" style="font-size:60px;width:min(900px,95%)"><br>
+   <span class="m">FILE <input data-f="name" data-i="${i}" value="${esc(r.name)}" placeholder="untitled" style="font-size:30px;width:300px">.oct</span><br>
+   ${btn('exp','EXPORT',i,'','m')} ${btn('test','TEST',i,'','m')} ${btn('delrow','DELROW',i,'','m')}`
+  :`<div class="title">${esc(r.title||'UNTITLED')}</div>`)+'<div>'+
+  r.levels.map((l,j)=>`<button class="lb ${!e&&l.done?'comp':''}" data-a="${e?'edl':'pl'}" data-i="${i}" data-j="${j}"><div class="tiny" style="visibility:hidden">X</div><div class="medium">${j+1}</div><div class="tiny" ${!e&&l.done?'':'style="visibility:hidden"'}>COMPLETE</div></button>`).join('')+
+  (e?btn('addl','+',i,'','lb'):'')+'</div>'+(e?'':btn('reset','RESET',i,'','m')+' '+btn('delrow','REMOVE',i,'','m'))+'</div>').join('')+
+ '<div>'+(e?btn('addrow','ADDROW','','','m')+' ':'')+btn('imp','IMPORT','','','m')+'</div>'+
+ (e?'':'<p class="t">DRAGYOUR OCTFILES ANYWHERE</p>')+'<p class="m" id="msg"></p>'}
+function lvl(){V.v='lvl';const r=rows()[V.r],l=r.levels[V.l],n=r.levels.length;
+ G.innerHTML=bar(esc(r.title||'UNTITLED'),btn('menu','LEVELMAP','','','m topright'))+
+ `<div class="title">${esc(l.gram)}</div><input id="in" autocomplete="off" style="display:block;margin:10px auto 0;width:500px">
+ <div>${btn('prev','← PREV','','','m nav'+(V.l?'':' greyed'))} ${V.l+1} ${btn('next','NEXT →','','','m nav'+(V.l<n-1?'':' greyed'))}</div>`;
+ const i=$('in');i.focus();
+ i.onchange=()=>{if(ok(l,i.value)){l.done=true;save();if(V.l<n-1){V.l++;lvl()}else menu()}else i.value=''}}
+function edl(){V.v='edl';const r=rows()[V.r],l=r.levels[V.l];
+ G.innerHTML=bar(esc(r.title||'UNTITLED')+' · '+(V.l+1),btn('menu','BACK','','','m topright'))+
+ `<p class="m">PROMPT (8 LETTERS) <span id="gc"></span></p>
+ <input data-f="gram" maxlength="8" value="${esc(l.gram.toUpperCase())}" style="width:500px;text-transform:uppercase" autocapitalize="characters">
+ <p class="m">ANSWERS (ONE PER LINE)</p><textarea data-f="ans">${esc(l.ans)}</textarea>
+ <p class="m">CONDITION (OPTIONAL) <span id="cs"></span></p>
+ <input data-f="cond" value="${esc(l.cond)}" placeholder='"ab" AND NOT "c"' style="font-size:30px;width:min(900px,95%)">
+ <p class="t">"TEXT" · AND OR XOR NOT · BEFORE (ORDER) · THEN (RIGHT AFTER) · ( )<br>E.G. "A" BEFORE "B" AND NOT "Z"</p>
+ <p class="m">TEST <input id="ts" style="font-size:30px;width:300px"> <span id="tr"></span></p>
+ ${btn('dell','DELETE','','','m')}<p class="m" id="msg"></p>`;chk()}
+function chk(){const l=rows()[V.r].levels[V.l];
+ $('gc').textContent=l.gram.length===8?'✔':`(${l.gram.length}/8)`;
+ let c='';try{if(parseCond(l.cond))c='✔'}catch(e){c='✘ '+e.message}
+ $('cs').textContent=c;$('tr').textContent=$('ts').value?(ok(l,$('ts').value)?'✔ CORRECT':'✘ WRONG'):''}
+
+/* ---- events ---- */
+G.onclick=e=>{const b=e.target.closest('[data-a]');if(!b)return;
+ const a=b.dataset.a,i=+b.dataset.i,j=+b.dataset.j;
+ if(a==='main')main();
+ else if(a==='play'||a==='edit'){V.m=a;menu()}
+ else if(a==='menu')menu();
+ else if(a==='pl'){V.r=i;V.l=j;lvl()}
+ else if(a==='edl'){V.r=i;V.l=j;edl()}
+ else if(a==='addl'){rows()[i].levels.push({gram:'NEWLEVEL',ans:'',cond:''});save();menu()}
+ else if(a==='addrow'){rows().push({title:'',name:'',levels:[]});save();menu()}
+ else if(a==='reset'){rows()[i].levels.forEach(l=>{l.done=false});save();menu()}
+ else if(a==='delrow'){rows().splice(i,1);save();menu()}
+ else if(a==='dell'){rows()[V.r].levels.splice(V.l,1);save();menu()}
+ else if(a==='test'){if(rows()[i].levels.length){V.r=i;V.l=0;lvl()}else say('ADD A LEVEL FIRST')}
+ else if(a==='exp')exportRow(i);
+ else if(a==='imp')$('fi').click();
+ else if(a==='prev'&&V.l>0){V.l--;lvl()}
+ else if(a==='next'&&V.l<rows()[V.r].levels.length-1){V.l++;lvl()}};
+G.oninput=e=>{const t=e.target,f=t.dataset.f;
+ if(f==='gram'){const p=t.selectionStart;t.value=t.value.toUpperCase();try{t.setSelectionRange(p,p)}catch(x){}}
+ if(f==='title'||f==='name')rows()[+t.dataset.i][f]=t.value;
+ else if(f)rows()[V.r].levels[V.l][f]=t.value;
+ if(f)save();if(V.v==='edl')chk()};
+$('fi').onchange=e=>{imp(e.target.files);e.target.value=''};
+addEventListener('dragover',e=>{e.preventDefault();document.body.classList.add('drop')});
+addEventListener('dragleave',e=>{if(!e.relatedTarget)document.body.classList.remove('drop')});
+addEventListener('drop',e=>{e.preventDefault();document.body.classList.remove('drop');if(V.v==='menu')imp(e.dataTransfer.files)});
+main();
+</script></body></html>
